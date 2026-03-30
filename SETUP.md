@@ -1,25 +1,39 @@
 # Configuración del Entorno - WhatsApp Bot (BYSMAX)
 
-Sigue estos comandos para configurar tu entorno de desarrollo en macOS/Linux.
+Sigue estos comandos para configurar tu entorno de desarrollo en **Ubuntu** (o macOS).
 
-### 1. Instalar Node.js (v22)
-Utilizando `nvm` (recomendado):
+### 1. Instalar NVM (Node Version Manager)
+Ejecuta el script oficial de instalación:
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+```
+Luego, activa NVM sin reiniciar la terminal:
+```bash
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+```
+
+### 2. Instalar Node.js (v22)
 ```bash
 nvm install 22 && nvm use 22
 ```
 
-### 2. Instalar Bun
+### 3. Instalar Bun
 ```bash
 curl -fsSL https://bun.sh/install | bash
 ```
-_(Reinicia tu terminal después de instalar Bun)_
+Activa Bun en la sesión actual:
+```bash
+export BUN_INSTALL="$HOME/.bun"
+export PATH="$BUN_INSTALL/bin:$PATH"
+```
 
-### 3. Instalar Dependencias del Proyecto
+### 4. Instalar Dependencias del Proyecto
 ```bash
 bun install
 ```
 
-### 4. Configurar Variables de Entorno
+### 5. Configurar Variables de Entorno
 Crea un archivo `.env` en la raíz del proyecto:
 ```bash
 touch .env
@@ -30,7 +44,7 @@ PORT=3008
 GEMINI_API_KEY=tu_api_key_aqui
 ```
 
-### 5. Iniciar el Bot (Modo Desarrollo)
+### 6. Iniciar el Bot (Modo Desarrollo)
 ```bash
 bun start
 ```
