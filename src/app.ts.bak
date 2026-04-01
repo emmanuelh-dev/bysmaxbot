@@ -5,10 +5,10 @@ import {
     fetchLatestBaileysVersion,
     makeWASocket,
     useMultiFileAuthState,
-    WAMessage,
+    type WAMessage,
 } from '@whiskeysockets/baileys'
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai'
-import { botConfig } from './config.js'
+import { botConfig } from './config'
 
 const PORT = process.env.PORT ?? 3008
 const MODEL_CANDIDATES = [botConfig.model, 'gemini-2.0-flash', 'gemini-1.5-flash']
@@ -41,12 +41,9 @@ const hasValidGeminiKey = Boolean(botConfig.apiKey) && !botConfig.apiKey.include
 const timers = new Map<string, NodeJS.Timeout>()
 const buffers = new Map<string, string[]>()
 const histories = new Map<string, GeminiHistoryItem[]>()
-const blacklist = new Set<string>(
-    (botConfig.blacklistedNumbers || []).map(n => String(n).replace(/\D/g, '').slice(-10))
-)
+const blacklist = new Set<string>()
 const lidPhoneCache = new Map<string, string | null>()
 const humanHandoffUsers = new Set<string>()
-const botSentMessages = new Set<string>()
 
 const app = express()
 let socketRef: ReturnType<typeof makeWASocket> | null = null
@@ -174,7 +171,7 @@ async function connectWhatsApp() {
 
 async function onIncomingMessage(message: WAMessage) {
     const remoteJid = message.key.remoteJid
-    if (!remoteJid) {
+    if (!remoteJid || message.key.fromMe === true) {
         return
     }
 
@@ -191,37 +188,12 @@ async function onIncomingMessage(message: WAMessage) {
         return
     }
 
-    const userNumber = normalizeNumber(userId)
-    
-    // Si el dueño de la línea (tú) envía un mensaje de forma manual:
-    if (message.key.fromMe === true) {
-        if (message.key.id && botSentMessages.has(message.key.id)) {
-            // Es un mensaje propio enviado programáticamente por el bot. Ignorar.
-            return
-        }
-        
-        const text = getMessageText(message) || ''
-        
-        // Si quieres reactivarlo forzadamente escribes "/bot on" a ese cliente
-        if (text.trim() === '/bot on') {
-            deactivateHumanHandoff(userId)
-            await sendText(userId, botConfig.botResumedMessage)
-        } else if (text.trim() === '/bot off' || text.trim() === '/bot pause') {
-            activateHumanHandoff(userId)
-        } else {
-            // Cualquier otro mensaje tuyo lo pondrá en pausa automáticamente, así no estorbas
-            activateHumanHandoff(userId)
-        }
-        return
-    }
-
     const text = getMessageText(message)
     if (!text) {
         return
     }
 
-    console.log(`\n=== MENSAJE ENTRANTE ===\nUser: ${userId}\nTexto: ${text}\n========================\n`)
-
+    const userNumber = normalizeNumber(userId)
     if (blacklist.has(userNumber)) {
         return
     }
@@ -264,18 +236,9 @@ async function onIncomingMessage(message: WAMessage) {
             }
 
             const fullPrompt = userMessages.join('\n')
-            const finalResponseObj = await getFinalResponse(userId, fullPrompt)
-            const finalReply = finalResponseObj.reply
-            
-            // Si es null o string vacío, significa que el LLM determinó que la conversación se acabó y no debe responder
-            if (!finalReply || finalReply.trim() === '' || finalReply.toLowerCase() === 'null') {
-                return
-            }
-
-            console.log(`\n=== RESPUESTA GENERADA ===\nUser: ${userId}\nJSON: ${JSON.stringify(finalResponseObj, null, 2)}\n==========================\n`)
-
-            await sendText(userId, finalReply, finalResponseObj.mediaUrl || null)
-            appendHistory(userId, fullPrompt, JSON.stringify(finalResponseObj))
+            const finalResponse = await getFinalResponse(userId, fullPrompt)
+            await sendText(userId, finalResponse)
+            appendHistory(userId, fullPrompt, finalResponse)
         } catch (error) {
             buffers.delete(userId)
             timers.delete(userId)
@@ -327,17 +290,12 @@ async function getAIResponse(userId: string, prompt: string) {
                             },
                             intent: {
                                 type: SchemaType.STRING,
-                                description: 'Debe ser uno de estos valores: agendar, pedir_ejemplos, consulta_precios, duda, jailbreak_meme',
+                                description: 'Debe ser uno de estos valores: agendar, pedir_ejemplos, consulta_precios, duda',
                             },
                             extracted_time: {
                                 type: SchemaType.STRING,
                                 nullable: true,
                             },
-                            mediaUrl: {
-                                type: SchemaType.STRING,
-                                nullable: true,
-                                description: "Ruta local de la imagen, ej: 'funny.jpg', si aplica."
-                            }
                         },
                         required: ['reply', 'intent'],
                     },
@@ -346,7 +304,6 @@ async function getAIResponse(userId: string, prompt: string) {
             const chat = model.startChat({ history })
             const result = await chat.sendMessage(prompt)
             responseText = result.response.text().trim()
-            console.log(result)
             break
         } catch (error) {
             lastError = error
@@ -453,27 +410,32 @@ function normalizeText(text: string) {
         .replace(/\p{Diacritic}/gu, '')
 }
 
-function resolveIntentResponse(aiResponse: { reply: string, intent: string, extracted_time: string | null, mediaUrl?: string | null }) {
-    return aiResponse
+function resolveIntentResponse(aiResponse: { reply: string, intent: string, extracted_time: string | null }) {
+    if (aiResponse.intent === 'pedir_ejemplos') {
+        const links = botConfig.menuSampleLinks.map((link, index) => `${index + 1}. ${link}`).join('\n')
+        return `${aiResponse.reply}\n\nAquí tienes algunos ejemplos:\n${links}`
+    }
+
+    if (aiResponse.intent === 'consulta_precios') {
+        return `${aiResponse.reply}\n\nEl precio de nuestro servicio es de $${botConfig.menuPrice} MXN al mes.`
+    }
+
+    if (aiResponse.intent === 'agendar') {
+        if (!aiResponse.extracted_time) {
+            return aiResponse.reply
+        }
+        return `${aiResponse.reply}\n\nNoté que quieres agendar para la fecha y hora: ${aiResponse.extracted_time}. Para confirmarlo, haz clic aquí: https://cal.com/bysmax/cita`
+    }
+
+    return aiResponse.reply
 }
 
-async function sendText(userId: string, text: string, mediaUrl?: string | null) {
+async function sendText(userId: string, text: string) {
     if (!socketRef) {
         throw new Error('WhatsApp no está conectado todavía')
     }
 
-    let sentMsg;
-    if (mediaUrl) {
-        sentMsg = await socketRef.sendMessage(userId, { image: { url: mediaUrl }, caption: text })
-    } else {
-        sentMsg = await socketRef.sendMessage(userId, { text })
-    }
-    
-    if (sentMsg?.key?.id) {
-        const id = sentMsg.key.id
-        botSentMessages.add(id)
-        setTimeout(() => botSentMessages.delete(id), 60000 * 5) // Borrar la memoria a los 5 mins
-    }
+    await socketRef.sendMessage(userId, { text })
 }
 
 function getMessageText(message: WAMessage) {
@@ -537,8 +499,8 @@ async function resolveReplyJid(remoteJid: string, message?: WAMessage) {
         return participant
     }
 
-    if (!mappedNumber) { 
-        return remoteJid 
+    if (!mappedNumber) {
+        return null
     }
 
     return toJid(mappedNumber)
